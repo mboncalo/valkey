@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "valkey.fullname" . }}-scripts
+  labels:
+    {{- include "valkey.labels" . | nindent 4 }}
+data:
+  init-valkey.sh: |-
+    #!/bin/sh
+    set -e
+    
+    HOSTNAME=$(hostname)
+    HEADLESS="{{ include "valkey.fullname" . }}-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
+    MY_FQDN="${HOSTNAME}.${HEADLESS}"
+    MASTER_FQDN="{{ include "valkey.fullname" . }}-0.${HEADLESS}"
+    
+    echo "Initializing Valkey on ${MY_FQDN}"
+    
+    cat > /config/valkey.conf <<EOF
+    bind 0.0.0.0
+    port {{ .Values.service.port }}
+    protected-mode no
+    dir /data
+    replica-announce-ip ${MY_FQDN}
+    replica-announce-port {{ .Values.service.port }}
+    {{- if .Values.auth.enabled }}
+    requirepass {{ .Values.auth.password }}
+    masterauth {{ .Values.auth.password }}
+    {{- end }}
+    {{- if .Values.persistence.enabled }}
+    save 900 1
+    save 300 10
+    save 60 10000
+    {{- else }}
+    save ""
+    {{- end }}
+    {{ .Values.extraConfig }}
+    EOF
+    
+    # If not the first pod, configure as replica
+    if [ "${HOSTNAME}" != "{{ include "valkey.fullname" . }}-0" ]; then
+      echo "Configuring as replica of ${MASTER_FQDN}"
+      
+      # Try to find actual master from other nodes
+      ACTUAL_MASTER=""
+      for i in $(seq 0 $(({{ .Values.replicaCount }}-1))); do
+        NODE="{{ include "valkey.fullname" . }}-${i}.${HEADLESS}"
+        ROLE=$(timeout 3 valkey-cli -h ${NODE} -p {{ .Values.service.port }} {{- if .Values.auth.enabled }} -a {{ .Values.auth.password }}{{- end }} INFO replication 2>/dev/null | grep "role:master" || true)
+        if [ -n "$ROLE" ]; then
+          ACTUAL_MASTER=$NODE
+          echo "Found master at ${ACTUAL_MASTER}"
+          break
+        fi
+      done
+      
+      REPL_MASTER=${ACTUAL_MASTER:-$MASTER_FQDN}
+      echo "replicaof ${REPL_MASTER} {{ .Values.service.port }}" >> /config/valkey.conf
+    fi
+    
+    echo "Valkey config created"
+    cat /config/valkey.conf
+    
+  init-sentinel.sh: |-
+    #!/bin/sh
+    set -e
+    
+    HOSTNAME=$(hostname)
+    HEADLESS="{{ include "valkey.fullname" . }}-headless.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
+    MY_FQDN="${HOSTNAME}.${HEADLESS}"
+    
+    echo "Initializing Sentinel on ${MY_FQDN}"
+    
+    # Find master by querying nodes
+    MASTER_FQDN="{{ include "valkey.fullname" . }}-0.${HEADLESS}"
+    for i in $(seq 0 $(({{ .Values.replicaCount }}-1))); do
+      NODE="{{ include "valkey.fullname" . }}-${i}.${HEADLESS}"
+      echo "Checking ${NODE}..."
+      ROLE=$(timeout 3 valkey-cli -h ${NODE} -p {{ .Values.service.port }} {{- if .Values.auth.enabled }} -a {{ .Values.auth.password }}{{- end }} INFO replication 2>/dev/null | grep "role:master" || true)
+      if [ -n "$ROLE" ]; then
+        MASTER_FQDN=$NODE
+        echo "Found master at ${MASTER_FQDN}"
+        break
+      fi
+    done
+    
+    cat > /config/sentinel.conf <<EOF
+    port {{ .Values.sentinel.port }}
+    dir /data
+    sentinel announce-hostnames yes
+    sentinel resolve-hostnames yes
+    sentinel announce-ip ${MY_FQDN}
+    sentinel announce-port {{ .Values.sentinel.port }}
+    sentinel monitor {{ .Values.sentinel.masterSet }} ${MASTER_FQDN} {{ .Values.service.port }} {{ .Values.sentinel.quorum }}
+    {{- if .Values.auth.enabled }}
+    sentinel auth-pass {{ .Values.sentinel.masterSet }} {{ .Values.auth.password }}
+    {{- end }}
+    sentinel down-after-milliseconds {{ .Values.sentinel.masterSet }} {{ .Values.sentinel.downAfterMilliseconds }}
+    sentinel parallel-syncs {{ .Values.sentinel.masterSet }} {{ .Values.sentinel.parallelSyncs }}
+    sentinel failover-timeout {{ .Values.sentinel.masterSet }} {{ .Values.sentinel.failoverTimeout }}
+    EOF
+    
+    echo "Sentinel config created"
+    cat /config/sentinel.conf
