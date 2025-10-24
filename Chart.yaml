@@ -12,7 +12,7 @@ keywords:
   - sentinel
 home: https://valkey.io
 sources:
-  - https://github.com/valkey-io/valkey
+  - https://github.com/mboncalo/valkey
 maintainers:
   - name: MB
-    email: your@email.com
+    email: mboncalo@gmail.com
