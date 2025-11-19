@@ -132,7 +132,7 @@ service:
   
   ## @param service.externalTrafficPolicy Valkey service external traffic policy
   ##
-  externalTrafficPolicy: Cluster
+  # externalTrafficPolicy: Cluster
   
   ## @param service.extraPorts Extra ports to expose (normally used with the `sidecar` value)
   ##
